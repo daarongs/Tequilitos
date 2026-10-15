@@ -1,0 +1,282 @@
+// ==========================================
+// CÓDIGO CANDIDATES 2026 - ROBORREGOS
+// Llantas Mecanum (2 Puentes H) + Barredora + Sensores
+// ==========================================
+
+const int SELECTOR_PISTA = A15; // Switch: HIGH = Pista A, LOW = Pista B
+
+// --- SENSOR DE COLOR TCS3200 ---
+const int S0 = 2, S1 = 3, sensorOut = 4, S2 = 5, S3 = 6;
+int redFreq = 0, greenFreq = 0, blueFreq = 0;
+
+// --- LEDs DE PUNTUACIÓN ---
+const int ledAzul = 8, ledVerde = 9, ledRojo = 10, ledAmarillo = 11;
+
+// --- SENSORES ULTRASÓNICOS ---
+const int TRIG_FRENTE = 12, ECHO_FRENTE = 13;
+const int TRIG_DERECHA = 14, ECHO_DERECHA = 15;
+const int TRIG_IZQUIERDA = 16, ECHO_IZQUIERDA = 17;
+// Nota: El 4to sensor (trasero) se puede agregar aquí si lo necesitan para alineación.
+const int UmbralPared = 15;
+
+// --- SENSOR DE LÍNEA (8 CANALES) ---
+const int IR_IZQ = A0; // Canal extremo izquierdo del módulo rojo
+const int IR_DER = A7; // Canal extremo derecho del módulo rojo
+const int UMBRAL_LINEA = 500; // Valor a partir del cual se considera "Línea Blanca"
+
+// --- MOTOR BARREDORA (Quinto motor) ---
+// Controlado mediante un Transistor TIP120 o Módulo Relevador
+const int PIN_BARREDORA = 30; 
+
+// --- MOTORES LLANTAS MECANUM (2 PUENTES H) ---
+// Puente H 1
+const int IN1_FL = 22, IN2_FL = 23; // Frontal Izquierdo
+const int IN1_BL = 24, IN2_BL = 25; // Trasero Izquierdo
+// Puente H 2
+const int IN1_FR = 26, IN2_FR = 27; // Frontal Derecho
+const int IN1_BR = 28, IN2_BR = 29; // Trasero Derecho
+
+// --- VARIABLES GLOBALES ---
+bool pistaA_Activa = true; 
+enum NivelPistaB { NIVEL_1_PELOTA, NIVEL_2_LINEAS, NIVEL_3_COLORES, FIN_PISTA };
+NivelPistaB nivelActualB = NIVEL_1_PELOTA;
+bool pelotaEnPosesion = false;
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(SELECTOR_PISTA, INPUT_PULLUP);
+  pistaA_Activa = digitalRead(SELECTOR_PISTA);
+
+  // Configuración Color
+  pinMode(S0, OUTPUT); pinMode(S1, OUTPUT); pinMode(S2, OUTPUT); pinMode(S3, OUTPUT);
+  pinMode(sensorOut, INPUT);
+  digitalWrite(S0, HIGH); digitalWrite(S1, LOW); // Escala 20%
+
+  // Configuración LEDs y Ultrasónicos
+  pinMode(ledAmarillo, OUTPUT); pinMode(ledRojo, OUTPUT); 
+  pinMode(ledVerde, OUTPUT); pinMode(ledAzul, OUTPUT);
+  pinMode(TRIG_FRENTE, OUTPUT); pinMode(ECHO_FRENTE, INPUT);
+  pinMode(TRIG_DERECHA, OUTPUT); pinMode(ECHO_DERECHA, INPUT);
+  pinMode(TRIG_IZQUIERDA, OUTPUT); pinMode(ECHO_IZQUIERDA, INPUT);
+
+  // Configuración Sensores de Línea
+  pinMode(IR_IZQ, INPUT); pinMode(IR_DER, INPUT);
+
+  // Configuración Barredora
+  pinMode(PIN_BARREDORA, OUTPUT);
+  digitalWrite(PIN_BARREDORA, LOW); // Barredora apagada
+
+  // Configuración Mecanum
+  pinMode(IN1_FL, OUTPUT); pinMode(IN2_FL, OUTPUT);
+  pinMode(IN1_BL, OUTPUT); pinMode(IN2_BL, OUTPUT);
+  pinMode(IN1_FR, OUTPUT); pinMode(IN2_FR, OUTPUT);
+  pinMode(IN1_BR, OUTPUT); pinMode(IN2_BR, OUTPUT);
+  
+  detenerMotores();
+}
+
+void loop() {
+  if (pistaA_Activa) {
+    loopPistaA();
+  } else {
+    loopPistaB();
+  }
+}
+
+// ==========================================
+// LÓGICA PISTA A: MAZE
+// ==========================================
+void loopPistaA() {
+  int colorDetectado = procesarColor(); 
+  if (colorDetectado == 5) { // Rojo = Fin
+    detenerMotores();
+    apagarTodosLosLEDs();
+    while (true); 
+  }
+
+  int distFrente = medirDistancia(TRIG_FRENTE, ECHO_FRENTE);
+  int distDerecha = medirDistancia(TRIG_DERECHA, ECHO_DERECHA);
+  int distIzquierda = medirDistancia(TRIG_IZQUIERDA, ECHO_IZQUIERDA);
+
+  // Navegación Básica: Regla de la mano derecha
+  if (distDerecha > UmbralPared) {
+    girarDerecha90();
+    avanzar(); delay(500); 
+  } else if (distFrente > UmbralPared) {
+    avanzar(); 
+  } else if (distIzquierda > UmbralPared) {
+    girarIzquierda90();
+  } else {
+    girar180();
+  }
+  delay(50);
+}
+
+// ==========================================
+// LÓGICA PISTA B: NIVELES
+// ==========================================
+void loopPistaB() {
+  switch (nivelActualB) {
+    
+    case NIVEL_1_PELOTA:
+      if (!pelotaEnPosesion) {
+        if (medirDistancia(TRIG_FRENTE, ECHO_FRENTE) < 6) {
+          detenerMotores();
+          // Activar barredora para jalar y asegurar la pelota
+          digitalWrite(PIN_BARREDORA, HIGH);
+          pelotaEnPosesion = true;
+        } else {
+          avanzar(); // Lógica de búsqueda frontal
+        }
+      } else {
+        avanzar(); 
+        if (procesarColor() == 5) { // Checkpoint Rojo alcanzado
+          nivelActualB = NIVEL_2_LINEAS;
+          avanzar(); delay(500); // Salir de la casilla roja
+        }
+      }
+      break;
+
+    case NIVEL_2_LINEAS:
+      avanzar();
+      // Uso de Mecanum para esquivar líneas blancas lateralmente
+      if (analogRead(IR_IZQ) > UMBRAL_LINEA) { 
+        strafeDerecha(); delay(400); 
+      } 
+      else if (analogRead(IR_DER) > UMBRAL_LINEA) { 
+        strafeIzquierda(); delay(400); 
+      }
+      
+      if (procesarColor() == 5) { // Segundo Checkpoint Rojo
+        nivelActualB = NIVEL_3_COLORES;
+        detenerMotores();
+      }
+      break;
+
+    case NIVEL_3_COLORES:
+      int instruccion = procesarColor();
+      if (instruccion == 1) { // CYAN -> Mover a la Derecha
+        strafeDerecha(); delay(800); 
+      } 
+      else if (instruccion == 3) { // AMARILLO -> Mover a la Izquierda
+        strafeIzquierda(); delay(800);
+      } 
+      else if (instruccion == 4) { // NARANJA -> Mover Adelante
+        avanzar(); delay(800);
+      } 
+      else if (instruccion == 2) { // ROSA -> Mover Abajo / Atrás
+        retroceder(); delay(800);
+      }
+      else if (instruccion == 5) { // ROJO (Meta Final)
+        detenerMotores();
+        nivelActualB = FIN_PISTA;
+      }
+      break;
+
+    case FIN_PISTA:
+      detenerMotores();
+      // La barredora sigue encendida asegurando la pelota para los puntos de bonus
+      while (true);
+      break;
+  }
+}
+
+// ==========================================
+// MOVIMIENTOS MECANUM (Totalmente Independientes)
+// ==========================================
+void avanzar() {
+  digitalWrite(IN1_FL, HIGH); digitalWrite(IN2_FL, LOW);
+  digitalWrite(IN1_BL, HIGH); digitalWrite(IN2_BL, LOW);
+  digitalWrite(IN1_FR, HIGH); digitalWrite(IN2_FR, LOW);
+  digitalWrite(IN1_BR, HIGH); digitalWrite(IN2_BR, LOW);
+}
+
+void retroceder() {
+  digitalWrite(IN1_FL, LOW); digitalWrite(IN2_FL, HIGH);
+  digitalWrite(IN1_BL, LOW); digitalWrite(IN2_BL, HIGH);
+  digitalWrite(IN1_FR, LOW); digitalWrite(IN2_FR, HIGH);
+  digitalWrite(IN1_BR, LOW); digitalWrite(IN2_BR, HIGH);
+}
+
+void strafeDerecha() {
+  digitalWrite(IN1_FL, HIGH); digitalWrite(IN2_FL, LOW);
+  digitalWrite(IN1_BL, LOW); digitalWrite(IN2_BL, HIGH);
+  digitalWrite(IN1_FR, LOW); digitalWrite(IN2_FR, HIGH);
+  digitalWrite(IN1_BR, HIGH); digitalWrite(IN2_BR, LOW);
+}
+
+void strafeIzquierda() {
+  digitalWrite(IN1_FL, LOW); digitalWrite(IN2_FL, HIGH);
+  digitalWrite(IN1_BL, HIGH); digitalWrite(IN2_BL, LOW);
+  digitalWrite(IN1_FR, HIGH); digitalWrite(IN2_FR, LOW);
+  digitalWrite(IN1_BR, LOW); digitalWrite(IN2_BR, HIGH);
+}
+
+void girarDerecha90() {
+  digitalWrite(IN1_FL, HIGH); digitalWrite(IN2_FL, LOW);
+  digitalWrite(IN1_BL, HIGH); digitalWrite(IN2_BL, LOW);
+  digitalWrite(IN1_FR, LOW); digitalWrite(IN2_FR, HIGH);
+  digitalWrite(IN1_BR, LOW); digitalWrite(IN2_BR, HIGH);
+  delay(600); // Ajustar este tiempo con cronómetro en pista
+  detenerMotores();
+}
+
+void girarIzquierda90() {
+  digitalWrite(IN1_FL, LOW); digitalWrite(IN2_FL, HIGH);
+  digitalWrite(IN1_BL, LOW); digitalWrite(IN2_BL, HIGH);
+  digitalWrite(IN1_FR, HIGH); digitalWrite(IN2_FR, LOW);
+  digitalWrite(IN1_BR, HIGH); digitalWrite(IN2_BR, LOW);
+  delay(600); // Ajustar este tiempo con cronómetro en pista
+  detenerMotores();
+}
+
+void girar180() {
+  girarDerecha90();
+  girarDerecha90();
+}
+
+void detenerMotores() {
+  digitalWrite(IN1_FL, LOW); digitalWrite(IN2_FL, LOW);
+  digitalWrite(IN1_BL, LOW); digitalWrite(IN2_BL, LOW);
+  digitalWrite(IN1_FR, LOW); digitalWrite(IN2_FR, LOW);
+  digitalWrite(IN1_BR, LOW); digitalWrite(IN2_BR, LOW);
+}
+
+// ==========================================
+// FUNCIONES DE SENSORES
+// ==========================================
+int medirDistancia(int pinTrig, int pinEcho) {
+  digitalWrite(pinTrig, LOW); delayMicroseconds(2);
+  digitalWrite(pinTrig, HIGH); delayMicroseconds(10);
+  digitalWrite(pinTrig, LOW);
+  long duracion = pulseIn(pinEcho, HIGH, 30000); 
+  if (duracion == 0) return 999; 
+  return duracion * 0.034 / 2;
+}
+
+int procesarColor() {
+  digitalWrite(S2, LOW); digitalWrite(S3, LOW); redFreq = pulseIn(sensorOut, LOW); delay(15);
+  digitalWrite(S2, HIGH); digitalWrite(S3, HIGH); greenFreq = pulseIn(sensorOut, LOW); delay(15);
+  digitalWrite(S2, LOW); digitalWrite(S3, HIGH); blueFreq = pulseIn(sensorOut, LOW); delay(15);
+
+  float suma = redFreq + greenFreq + blueFreq;
+  if(suma == 0) return 0;
+  
+  float pR = (redFreq / suma) * 100.0;
+  float pG = (greenFreq / suma) * 100.0;
+  float pB = (blueFreq / suma) * 100.0;
+
+  if (pR < pG && pR < pB && redFreq < 110) return 5; // ROJO
+  if (pB < pR && pB < pG) { digitalWrite(ledAzul, HIGH); return 1; } // CYAN
+  if (pG > pR && pG > pB && abs(pR - pB) <= 10.0) { digitalWrite(ledVerde, HIGH); return 2; } // ROSA
+  if (pR < pB && abs(pG - pR) <= 13.0) { digitalWrite(ledAmarillo, HIGH); return 3; } // AMARILLO
+  if (pR < pB && abs(pG - pR) > 13.0) { digitalWrite(ledRojo, HIGH); return 4; } // NARANJA
+  
+  apagarTodosLosLEDs();
+  return 0;
+}
+
+void apagarTodosLosLEDs() {
+  digitalWrite(ledAmarillo, LOW); digitalWrite(ledRojo, LOW); 
+  digitalWrite(ledVerde, LOW); digitalWrite(ledAzul, LOW);
+}
